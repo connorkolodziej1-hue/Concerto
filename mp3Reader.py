@@ -1,59 +1,171 @@
-
 import librosa
 import numpy as np
 
+PITCH_CLASSES = ['C', 'C#', 'D', 'D#', 'E', 'F',
+                 'F#', 'G', 'G#', 'A', 'A#', 'B']
+
+def build_major_templates():
+    major = []
+
+    for i in range(12):
+        m = np.zeros(12)
+        m[i] = 1
+        m[(i + 4) % 12] = 1
+        m[(i + 7) % 12] = 1
+        major.append(m)
+
+    return major
+
+
+def build_minor_templates():
+    minor = []
+
+    for i in range(12):
+        m = np.zeros(12)
+        m[i] = 1
+        m[(i + 3) % 12] = 1
+        m[(i + 7) % 12] = 1
+        minor.append(m)
+
+    return minor
+
+
+# Precompute once (fast at runtime)
+MAJOR_TEMPLATES = build_major_templates()
+MINOR_TEMPLATES = build_minor_templates()
+
+
+def _predict_chord(chroma_vec):
+    best_score = -1
+    best_label = "N/A"
+
+    for i, root in enumerate(PITCH_CLASSES):
+        maj_score = np.dot(chroma_vec, MAJOR_TEMPLATES[i])
+        min_score = np.dot(chroma_vec, MINOR_TEMPLATES[i])
+
+        if maj_score > best_score:
+            best_score = maj_score
+            best_label = root
+
+        if min_score > best_score:
+            best_score = min_score
+            best_label = root + "m"
+
+    return best_label
+
+
+def _predict_note(chroma_vec):
+    idx = np.argmax(chroma_vec)
+    return PITCH_CLASSES[idx]
+
+
+# ----------------------------
+# KEY DETECTION (unchanged)
+# ----------------------------
 def detect_key(y, sr):
     try:
-        # Compute chroma features
-        chroma = librosa.feature.chroma_cqt(y=y, sr=sr)
+        y_harmonic, _ = librosa.effects.hpss(y)
 
-        # Average chroma over time
+        chroma = librosa.feature.chroma_cqt(y=y_harmonic, sr=sr)
         chroma_mean = np.mean(chroma, axis=1)
 
-        # Define pitch classes
-        pitch_classes = ['C', 'C#', 'D', 'D#', 'E', 'F',
-                         'F#', 'G', 'G#', 'A', 'A#', 'B']
-
-        # Find the most prominent pitch
         key_index = np.argmax(chroma_mean)
-        return pitch_classes[key_index]
+        return PITCH_CLASSES[key_index]
 
     except Exception as e:
         return f"Error processing file: {e}"
 
-def detect_tempo(y, sr):
 
+# ----------------------------
+# TEMPO + BEATS
+# ----------------------------
+def detect_tempo(y, sr):
     tempo, beat_frames = librosa.beat.beat_track(y=y, sr=sr)
     beat_times = librosa.frames_to_time(beat_frames, sr=sr)
-    
+
     return tempo, beat_times
 
-def detect_notes(beat_times, y, sr):
-    f0 = librosa.yin(
-        y,
-        fmin=librosa.note_to_hz('C2'),
-        fmax=librosa.note_to_hz('C7'),
-        sr=sr
-    )
 
-    times = librosa.times_like(f0, sr=sr)
+# ----------------------------
+# CHORD vs NOTE ANALYSIS (NEW CORE)
+# ----------------------------
+def analyze_beats(y, sr, beat_times, threshold=2):
+    y_harmonic, _ = librosa.effects.hpss(y)
+
+    chroma = librosa.feature.chroma_cqt(y=y_harmonic, sr=sr)
+    times = librosa.times_like(chroma, sr=sr)
+
+    results = []
+
+    for bt in beat_times:
+        idx = np.argmin(np.abs(times - bt))
+        vec = chroma[:, idx]
+
+        active = np.sum(vec > 0.3)
+
+        label_type = "note" if active <= 1 else "chord"
+
+        prediction = None
+
+        if label_type == "note":
+            prediction = _predict_note(vec)
+        else:
+            prediction = _predict_chord(vec)
+
+        results.append({
+            "beat_time": float(bt),
+            "type": label_type,
+            "prediction": prediction,
+            "active_pitches": int(active),
+            "chroma": vec
+        })
+
+    return results
+
+
+# ----------------------------
+# NOTES (UPDATED)
+# ----------------------------
+def detect_notes(y, sr, beat_times):
+    """
+    Only used when label == 'note'
+    """
 
     notes = []
-    for beat_time in beat_times:
-        closest_index = np.argmin(np.abs(times - beat_time))
-        pitch_hz = f0[closest_index]
-        notes.append(librosa.hz_to_note(pitch_hz))
+
+    for bt in beat_times:
+        f0 = librosa.yin(
+            y,
+            fmin=librosa.note_to_hz('C2'),
+            fmax=librosa.note_to_hz('C7'),
+            sr=sr
+        )
+
+        times = librosa.times_like(f0, sr=sr)
+        idx = np.argmin(np.abs(times - bt))
+
+        pitch_hz = f0[idx]
+        note = librosa.hz_to_note(pitch_hz)
+
+        notes.append(note)
 
     return notes
-        
+
+
+# ----------------------------
+# MAIN PIPELINE
+# ----------------------------
 def main(audio_path):
-    # Load audio
     y, sr = librosa.load(audio_path)
-    
+
     key = detect_key(y, sr)
     tempo, beat_times = detect_tempo(y, sr)
+
+    beat_analysis = analyze_beats(y, sr, beat_times)
     
-    notes = detect_notes(beat_times, y, sr)
-    
-    
-    
+
+    return {
+        "key": key,
+        "tempo": tempo,
+        "beats": beat_analysis
+    }
