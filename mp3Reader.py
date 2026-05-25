@@ -1,5 +1,10 @@
+import json
+import os
+
 import librosa
 import numpy as np
+import time
+import shutil
 
 PITCH_CLASSES = ['C', 'C#', 'D', 'D#', 'E', 'F',
                  'F#', 'G', 'G#', 'A', 'A#', 'B']
@@ -30,7 +35,6 @@ def build_minor_templates():
     return minor
 
 
-# Precompute once (fast at runtime)
 MAJOR_TEMPLATES = build_major_templates()
 MINOR_TEMPLATES = build_minor_templates()
 
@@ -59,9 +63,6 @@ def _predict_note(chroma_vec):
     return PITCH_CLASSES[idx]
 
 
-# ----------------------------
-# KEY DETECTION (unchanged)
-# ----------------------------
 def detect_key(y, sr):
     try:
         y_harmonic, _ = librosa.effects.hpss(y)
@@ -76,20 +77,20 @@ def detect_key(y, sr):
         return f"Error processing file: {e}"
 
 
-# ----------------------------
-# TEMPO + BEATS
-# ----------------------------
 def detect_tempo(y, sr):
     tempo, beat_frames = librosa.beat.beat_track(y=y, sr=sr)
     beat_times = librosa.frames_to_time(beat_frames, sr=sr)
 
-    return tempo, beat_times
+    return tempo.item(), beat_times.tolist()
 
+def preprocess_audio(y):
+    y, _ = librosa.effects.trim(y)         # remove silence
+    y = librosa.util.normalize(y)          # normalize volume
+    y = librosa.effects.preemphasis(y)     # reduce low-frequency noise
+    return y
 
-# ----------------------------
-# CHORD vs NOTE ANALYSIS (NEW CORE)
-# ----------------------------
 def analyze_beats(y, sr, beat_times, threshold=2):
+    y = preprocess_audio(y)
     y_harmonic, _ = librosa.effects.hpss(y)
 
     chroma = librosa.feature.chroma_cqt(y=y_harmonic, sr=sr)
@@ -117,15 +118,12 @@ def analyze_beats(y, sr, beat_times, threshold=2):
             "type": label_type,
             "prediction": prediction,
             "active_pitches": int(active),
-            "chroma": vec
+            "chroma": vec.tolist()
         })
 
     return results
 
 
-# ----------------------------
-# NOTES (UPDATED)
-# ----------------------------
 def detect_notes(y, sr, beat_times):
     """
     Only used when label == 'note'
@@ -164,8 +162,49 @@ def main(audio_path):
     beat_analysis = analyze_beats(y, sr, beat_times)
     
 
-    return {
+    song_data = {
         "key": key,
         "tempo": tempo,
         "beats": beat_analysis
     }
+
+    with open("readMP3Results/song_data.json", "w", encoding="utf-8") as f:
+        json.dump(song_data, f, indent=4, ensure_ascii=False)
+
+
+# ----------------------------
+# Listener and executor
+# ----------------------------
+INPUT_DIR = "mp3ReaderInput"
+PROCESSED_DIR = "processedMP3s"
+
+# Create processed directory if missing
+os.makedirs(PROCESSED_DIR, exist_ok=True)
+
+while True:
+    inputs = os.listdir(INPUT_DIR)
+
+    for file_name in inputs:
+
+        if file_name.endswith(".mp3"):
+
+            input_path = os.path.join(INPUT_DIR, file_name)
+
+            try:
+                # Process file
+                main(input_path)
+
+                print("translated:", input_path)
+
+                # Move file after successful processing
+                processed_path = os.path.join(PROCESSED_DIR, file_name)
+
+                shutil.move(input_path, processed_path)
+
+                print("moved to:", processed_path)
+
+            except Exception as e:
+                print(f"Error processing {file_name}: {e}")
+
+    time.sleep(1)
+    

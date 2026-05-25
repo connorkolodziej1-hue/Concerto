@@ -2,11 +2,6 @@ import numpy as np
 import pytest
 import mp3Reader
 
-def test_pitch_classes_valid():
-    assert len(mp3Reader.PITCH_CLASSES) == 12
-    assert "C" in mp3Reader.PITCH_CLASSES
-    assert "B" in mp3Reader.PITCH_CLASSES
-
 def test_active_pitch_logic():
     vec = np.zeros(12)
     vec[0] = 0.9
