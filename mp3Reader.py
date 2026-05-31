@@ -41,26 +41,34 @@ MINOR_TEMPLATES = build_minor_templates()
 
 def _predict_chord(chroma_vec):
     best_score = -1
+    second_score = -1
     best_label = "N/A"
 
     for i, root in enumerate(PITCH_CLASSES):
-        maj_score = np.dot(chroma_vec, MAJOR_TEMPLATES[i])
-        min_score = np.dot(chroma_vec, MINOR_TEMPLATES[i])
+        candidates = [
+            (np.dot(chroma_vec, MAJOR_TEMPLATES[i]), root),
+            (np.dot(chroma_vec, MINOR_TEMPLATES[i]), root + "m")
+        ]
 
-        if maj_score > best_score:
-            best_score = maj_score
-            best_label = root
+        for score, label in candidates:
+            if score > best_score:
+                second_score = best_score
+                best_score = score
+                best_label = label
+            elif score > second_score:
+                second_score = score
 
-        if min_score > best_score:
-            best_score = min_score
-            best_label = root + "m"
+    confidence = (best_score - second_score) / (best_score + 1e-6)
 
-    return best_label
+    return best_label, confidence
 
 
 def _predict_note(chroma_vec):
     idx = np.argmax(chroma_vec)
-    return PITCH_CLASSES[idx]
+    prediction = PITCH_CLASSES[idx]
+    confidence = np.max(chroma_vec) / (np.sum(chroma_vec) + 1e-6)
+
+    return prediction, confidence
 
 
 def detect_key(y, sr):
@@ -102,52 +110,31 @@ def analyze_beats(y, sr, beat_times, threshold=2):
         idx = np.argmin(np.abs(times - bt))
         vec = chroma[:, idx]
 
-        active = np.sum(vec > 0.3)
-
+        threshold = np.max(vec) * 0.4
+        active = np.sum(vec > threshold)
+        
         label_type = "note" if active <= 1 else "chord"
 
         prediction = None
 
         if label_type == "note":
-            prediction = _predict_note(vec)
+            prediction, confidence = _predict_note(vec)
         else:
-            prediction = _predict_chord(vec)
+            prediction, confidence = _predict_chord(vec)
+            if confidence < 0.6:
+                prediction, confidence = _predict_note(vec)
+                label_type = "Can't determine if chord or note"
 
         results.append({
             "beat_time": float(bt),
             "type": label_type,
             "prediction": prediction,
-            "active_pitches": int(active),
+            "confidence": float(confidence),
+            "possible_active_pitches": int(active),
             "chroma": vec.tolist()
         })
 
     return results
-
-
-def detect_notes(y, sr, beat_times):
-    """
-    Only used when label == 'note'
-    """
-
-    notes = []
-
-    for bt in beat_times:
-        f0 = librosa.yin(
-            y,
-            fmin=librosa.note_to_hz('C2'),
-            fmax=librosa.note_to_hz('C7'),
-            sr=sr
-        )
-
-        times = librosa.times_like(f0, sr=sr)
-        idx = np.argmin(np.abs(times - bt))
-
-        pitch_hz = f0[idx]
-        note = librosa.hz_to_note(pitch_hz)
-
-        notes.append(note)
-
-    return notes
 
 
 # ----------------------------
